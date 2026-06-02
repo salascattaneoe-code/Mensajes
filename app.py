@@ -3,7 +3,13 @@ import sqlite3
 import os
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
+from datetime import datetime
+import pytz
 
+# Para obtener la hora exacta de Argentina (donde estás)
+def get_time():
+    arg_tz = pytz.timezone('America/Argentina/Buenos_Aires')
+    return datetime.now(arg_tz)
 app = Flask(__name__)
 app.secret_key = 'super_secret_saas_key_prod'
 DB_NAME = 'database.db'

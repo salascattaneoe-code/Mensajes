@@ -3,6 +3,7 @@ import sqlite3
 import os
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
+from datetime import datetime, timedelta
 
 app = Flask(__name__)
 app.secret_key = 'super_secret_saas_key_prod'
@@ -31,7 +32,6 @@ def init_db():
                     password_hash TEXT NOT NULL,
                     name TEXT NOT NULL
                 )''')
-    # Añadimos la columna 'file_path' a la tabla de mensajes
     c.execute('''CREATE TABLE IF NOT EXISTS messages (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     sender_id INTEGER NOT NULL,
@@ -114,7 +114,20 @@ def get_conversations():
         ORDER BY last_timestamp DESC
     '''
     c.execute(query, (user_id, user_id, user_id, user_id, user_id, user_id, user_id, user_id))
-    convs = [dict(row) for row in c.fetchall()]
+    
+    convs = []
+    for row in c.fetchall():
+        d = dict(row)
+        # Convertimos la hora del último mensaje a zona horaria de Argentina (UTC-3)
+        if d.get('last_timestamp'):
+            try:
+                dt = datetime.strptime(d['last_timestamp'], '%Y-%m-%d %H:%M:%S')
+                dt_arg = dt - timedelta(hours=3)
+                d['last_timestamp'] = dt_arg.strftime('%H:%M')
+            except Exception:
+                pass
+        convs.append(d)
+        
     conn.close()
     return jsonify(convs)
 
@@ -123,15 +136,30 @@ def get_messages(other_user_id):
     if 'user_id' not in session: return jsonify({'error': 'No autorizado'}), 401
     conn = get_db(); c = conn.cursor()
     c.execute('''
-        SELECT m.*, strftime('%H:%M', m.timestamp, 'localtime') as time_fmt 
-        FROM messages m WHERE (sender_id = ? AND receiver_id = ?) OR (sender_id = ? AND receiver_id = ?)
+        SELECT * FROM messages 
+        WHERE (sender_id = ? AND receiver_id = ?) OR (sender_id = ? AND receiver_id = ?)
         ORDER BY timestamp ASC
     ''', (session['user_id'], other_user_id, other_user_id, session['user_id']))
-    messages = [dict(row) for row in c.fetchall()]
+    
+    messages = []
+    for row in c.fetchall():
+        d = dict(row)
+        # Convertimos el timestamp UTC a la hora formateada de Argentina (UTC-3)
+        if d.get('timestamp'):
+            try:
+                dt = datetime.strptime(d['timestamp'], '%Y-%m-%d %H:%M:%S')
+                dt_arg = dt - timedelta(hours=3)
+                d['time_fmt'] = dt_arg.strftime('%H:%M')
+            except Exception:
+                d['time_fmt'] = d['timestamp']
+        else:
+            d['time_fmt'] = ""
+        messages.append(d)
+        
     conn.close()
     return jsonify(messages)
 
-# --- NUEVA RUTA DE ENVÍO QUE SOPORTA ARCHIVOS (FORM-DATA) ---
+# --- RUTA DE ENVÍO QUE SOPORTA ARCHIVOS (FORM-DATA) ---
 @app.route('/api/messages/send', methods=['POST'])
 def send_message():
     if 'user_id' not in session: return jsonify({'error': 'No autorizado'}), 401

@@ -1,42 +1,37 @@
 from flask import Flask, render_template, request, jsonify, session, send_from_directory
 import sqlite3
 import os
-import random
-import string
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
-app.secret_key = 'desarrollo_web_seguro_2026'
+app.secret_key = 'super_secret_saas_key_prod'
+DB_NAME = 'database.db'
 
-# La base de datos se creará en la raíz del proyecto
-DB_PATH = 'database.db'
-
-# --- CONFIGURACIÓN DE ARCHIVOS ---
+# Configuración de subida de archivos
 UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), 'uploads')
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024 # Límite de 16MB
+# Limitamos el tamaño máximo a 16MB para proteger el servidor
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024 
+
+# Asegurar que la carpeta de subidas exista
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# --- BASE DE DATOS ---
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_NAME)
     conn.row_factory = sqlite3.Row
     return conn
 
 def init_db():
     conn = get_db()
     c = conn.cursor()
-    # Tabla de Usuarios (con sistema de verificación)
     c.execute('''CREATE TABLE IF NOT EXISTS users (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     email TEXT UNIQUE NOT NULL,
                     password_hash TEXT NOT NULL,
-                    name TEXT NOT NULL,
-                    is_verified INTEGER DEFAULT 0,
-                    verification_token TEXT
+                    name TEXT NOT NULL
                 )''')
-    # Tabla de Mensajes
+    # Añadimos la columna 'file_path' a la tabla de mensajes
     c.execute('''CREATE TABLE IF NOT EXISTS messages (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     sender_id INTEGER NOT NULL,
@@ -48,23 +43,21 @@ def init_db():
     conn.commit()
     conn.close()
 
-# Inicializamos la BD al arrancar el servidor
 with app.app_context():
     init_db()
 
-# --- RUTAS PRINCIPALES ---
 @app.route('/')
 def index():
-    # Recuerda: El archivo index.html DEBE estar dentro de una carpeta llamada "templates"
     return render_template('index.html')
 
+# --- RUTA PARA DESCARGAR/VER ARCHIVOS ---
 @app.route('/uploads/<filename>')
 def download_file(filename):
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
-# --- RUTAS DE AUTENTICACIÓN ---
+# --- API DE AUTENTICACIÓN ---
 @app.route('/api/auth/status', methods=['GET'])
-def status():
+def auth_status():
     if 'user_id' in session:
         return jsonify({'logged_in': True, 'user_id': session['user_id'], 'name': session.get('user_name'), 'email': session.get('email')})
     return jsonify({'logged_in': False})
@@ -72,103 +65,46 @@ def status():
 @app.route('/register', methods=['POST'])
 def register():
     data = request.json
-    name = data.get('name')
-    email = data.get('email')
-    password = data.get('password')
-    
-    if not name or not email or not password:
-        return jsonify({'error': 'Todos los campos son obligatorios'}), 400
-    
-    # Generar código de 6 dígitos
-    code = ''.join(random.choices(string.digits, k=6))
-    
-    # IMPORTANTE: Este print hace que el código aparezca en los Logs de Render
-    print(f"==================================================")
-    print(f"CÓDIGO DE VERIFICACIÓN PARA {email}: {code}")
-    print(f"==================================================")
-    
+    name, email, password = data.get('name'), data.get('email'), data.get('password')
+    if not name or not email or not password: return jsonify({'error': 'Campos obligatorios faltantes'}), 400
     try:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("INSERT INTO users (email, password_hash, name, is_verified, verification_token) VALUES (?, ?, ?, 0, ?)", 
-                  (email, generate_password_hash(password), name, code))
-        conn.commit()
-        conn.close()
-        return jsonify({'success': True, 'needs_verification': True, 'email': email})
-    except sqlite3.IntegrityError:
-        return jsonify({'error': 'El correo ya está registrado'}), 400
-    except Exception as e:
-        return jsonify({'error': f'Error interno del servidor: {str(e)}'}), 500
-
-@app.route('/api/auth/verify', methods=['POST'])
-def verify_code():
-    data = request.json
-    email = data.get('email')
-    code = data.get('code')
-    
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT id FROM users WHERE email = ? AND verification_token = ?", (email, code))
-    user = c.fetchone()
-    
-    if user:
-        c.execute("UPDATE users SET is_verified = 1, verification_token = NULL WHERE id = ?", (user['id'],))
-        conn.commit()
-        conn.close()
+        conn = get_db(); c = conn.cursor()
+        c.execute("INSERT INTO users (email, password_hash, name) VALUES (?, ?, ?)", (email, generate_password_hash(password), name))
+        conn.commit(); conn.close()
         return jsonify({'success': True})
-        
-    conn.close()
-    return jsonify({'error': 'Código inválido o correo incorrecto'}), 400
+    except sqlite3.IntegrityError: return jsonify({'error': 'El correo ya existe'}), 400
 
 @app.route('/login', methods=['POST'])
 def login():
     data = request.json
-    conn = get_db()
-    c = conn.cursor()
+    conn = get_db(); c = conn.cursor()
     c.execute("SELECT * FROM users WHERE email = ?", (data.get('email'),))
-    user = c.fetchone()
-    conn.close()
-    
+    user = c.fetchone(); conn.close()
     if user and check_password_hash(user['password_hash'], data.get('password')):
-        if user['is_verified'] == 0:
-            return jsonify({'error': 'Cuenta pendiente de verificación', 'needs_verification': True, 'email': user['email']}), 403
-        
-        session['user_id'] = user['id']
-        session['user_name'] = user['name']
-        session['email'] = user['email']
+        session['user_id'], session['user_name'], session['email'] = user['id'], user['name'], user['email']
         return jsonify({'success': True})
-        
-    return jsonify({'error': 'Credenciales incorrectas'}), 401
+    return jsonify({'error': 'Credenciales inválidas'}), 401
 
 @app.route('/logout', methods=['POST'])
 def logout():
     session.clear()
     return jsonify({'success': True})
 
-# --- RUTAS DE MENSAJERÍA ---
+# --- API DE MENSAJERÍA ---
 @app.route('/api/users/search', methods=['POST'])
 def search_user():
-    if 'user_id' not in session: 
-        return jsonify({'error': 'No autorizado'}), 401
-        
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT id, name, email FROM users WHERE email = ? AND id != ? AND is_verified = 1", (request.json.get('email'), session['user_id']))
-    user = c.fetchone()
-    conn.close()
-    
-    if user: 
-        return jsonify(dict(user))
-    return jsonify({'error': 'Usuario no encontrado o no verificado'}), 404
+    if 'user_id' not in session: return jsonify({'error': 'No autorizado'}), 401
+    conn = get_db(); c = conn.cursor()
+    c.execute("SELECT id, name, email FROM users WHERE email = ? AND id != ?", (request.json.get('email'), session['user_id']))
+    user = c.fetchone(); conn.close()
+    if user: return jsonify(dict(user))
+    return jsonify({'error': 'Usuario no encontrado'}), 404
 
 @app.route('/api/conversations', methods=['GET'])
 def get_conversations():
-    if 'user_id' not in session: 
-        return jsonify({'error': 'No autorizado'}), 401
-        
+    if 'user_id' not in session: return jsonify({'error': 'No autorizado'}), 401
     user_id = session['user_id']
-    conn = get_db()
-    c = conn.cursor()
+    conn = get_db(); c = conn.cursor()
     query = '''
         SELECT u.id, u.name, u.email, 
                (SELECT content FROM messages WHERE (sender_id = u.id AND receiver_id = ?) OR (sender_id = ? AND receiver_id = u.id) ORDER BY timestamp DESC LIMIT 1) as last_message,
@@ -184,11 +120,8 @@ def get_conversations():
 
 @app.route('/api/messages/<int:other_user_id>', methods=['GET'])
 def get_messages(other_user_id):
-    if 'user_id' not in session: 
-        return jsonify({'error': 'No autorizado'}), 401
-        
-    conn = get_db()
-    c = conn.cursor()
+    if 'user_id' not in session: return jsonify({'error': 'No autorizado'}), 401
+    conn = get_db(); c = conn.cursor()
     c.execute('''
         SELECT m.*, strftime('%H:%M', m.timestamp, 'localtime') as time_fmt 
         FROM messages m WHERE (sender_id = ? AND receiver_id = ?) OR (sender_id = ? AND receiver_id = ?)
@@ -198,30 +131,28 @@ def get_messages(other_user_id):
     conn.close()
     return jsonify(messages)
 
+# --- NUEVA RUTA DE ENVÍO QUE SOPORTA ARCHIVOS (FORM-DATA) ---
 @app.route('/api/messages/send', methods=['POST'])
 def send_message():
-    if 'user_id' not in session: 
-        return jsonify({'error': 'No autorizado'}), 401
-        
+    if 'user_id' not in session: return jsonify({'error': 'No autorizado'}), 401
+    
     receiver_id = request.form.get('receiver_id')
     content = request.form.get('content', '')
     file = request.files.get('attachment')
     filename = None
-    
-    if not receiver_id: 
-        return jsonify({'error': 'Destinatario inválido'}), 400
-    if not content and not file: 
-        return jsonify({'error': 'Mensaje vacío'}), 400
-    
+
+    if not receiver_id: return jsonify({'error': 'Destinatario inválido'}), 400
+    if not content and not file: return jsonify({'error': 'El mensaje no puede estar vacío'}), 400
+
+    # Procesar archivo si viene alguno adjunto
     if file and file.filename != '':
         filename = secure_filename(file.filename)
         file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
-        
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("INSERT INTO messages (sender_id, receiver_id, content, file_path) VALUES (?, ?, ?, ?)", (session['user_id'], receiver_id, content, filename))
-    conn.commit()
-    conn.close()
+
+    conn = get_db(); c = conn.cursor()
+    c.execute("INSERT INTO messages (sender_id, receiver_id, content, file_path) VALUES (?, ?, ?, ?)", 
+              (session['user_id'], receiver_id, content, filename))
+    conn.commit(); conn.close()
     return jsonify({'success': True})
 
 if __name__ == '__main__':
